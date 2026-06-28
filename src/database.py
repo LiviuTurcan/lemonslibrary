@@ -74,15 +74,51 @@ def add_game( # all parameters for the game
 
 
 def get_all_games():
-    # retrieves all games from the database as a list of dicts, sorted by title
-    conn = sqlite3.connect(DB_PATH) 
-    conn.row_factory = sqlite3.Row  # allows us to access columns by name like row['title']
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # This allows us to access columns by name like row['title']
     cursor = conn.cursor()
 
     cursor.execute("SELECT * FROM games ORDER BY title ASC")
     rows = cursor.fetchall()
 
-    # convert list of sqlite3.Row to list of dicts
+    # Convert list of sqlite3.Row to list of dicts
     games = [dict(row) for row in rows]
     conn.close()
     return games
+
+def update_game(game_id, title, release_date, developer, genre, description, status):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            UPDATE games 
+            SET title = ?, release_date = ?, developer = ?, genre = ?, description = ?, status = ?
+            WHERE id = ?
+        """,
+            (
+                title,
+                release_date,
+                developer,
+                genre,
+                description,
+                status,
+                game_id,
+            ),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        # Title unique constraint failed (if they try to rename it to a title that already exists)
+        return False
+    finally:
+        conn.close()
+
+
+def delete_game(game_id):
+    #delete a game from db by id
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM games WHERE id = ?", (game_id,))
+    conn.commit()
+    conn.close()

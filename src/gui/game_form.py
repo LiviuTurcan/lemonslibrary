@@ -6,7 +6,7 @@ import threading # for running the download in a separate gui thread to avoid fr
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-from src.database import add_game
+from src.database import add_game, update_game, delete_game
 from src.api import IGDBClient # for fetching game data from IGDB
 
 # ---- Theme settings ----
@@ -230,26 +230,208 @@ class GameForm(ctk.CTkFrame):
 
 
 
-# PLACEHOLDER METHODS FOR BUTTONS
-# FOR TESTING
     def _on_back(self):
-        # placeholder for navigating back to the gallery
-        print("Back button clicked!")
         if self.on_back_callback:
             self.on_back_callback()
 
     def _on_search(self):
-        # placeholder for searching IGDB database
-        print(f"Search triggered for: {self.search_entry.get()}")
+        # starts a background thread to search IGDB for the query entered in the search entry
+        query = self.search_entry.get().strip() # get the search string from the entry field
+        if not query:
+            return # ignore empty searches
+
+        # disable search fields to prevent spamming while fetching
+        self.search_btn.configure(state="disabled", text="Searching...")
+        self.search_entry.configure(state="disabled")
+        
+        # separate thread for background search to avoid freezing the GUI
+        thread = threading.Thread(target=self._search_thread_target, args=(query,), daemon=True)
+        thread.start()
+
+    def _search_thread_target(self, query):
+        # worker thread to call the IGDB API and fetch search results
+        results = self.api_client.search_game(query)
+        # Schedule the UI update safely back on the main thread
+        self.after(0, self._on_search_complete, results)
+
+    def _on_search_complete(self, results):
+        # callback to populate the combobox dropdown with search matches
+        # reenable search controls
+        self.search_btn.configure(state="normal", text="Search")
+        self.search_entry.configure(state="normal")
+
+        self.search_results = results
+        
+        if not results:
+            self.matches_combo.configure(values=["No matches found"])
+            self.matches_combo.set("No matches found")
+            return
+
+        # create user-friendly dropdown options showing "Title (Year)"
+        dropdown_options = []
+        for game in results:
+            year = game["release_date"][:4] if game["release_date"] != "Unknown" else "N/A"
+            dropdown_options.append(f"{game['title']} ({year})")
+        
+        self.matches_combo.configure(values=dropdown_options)
+        self.matches_combo.set("Select a match...")
 
     def _on_match_selected(self, choice):
-        # dropdown placeholder
-        print(f"Dropdown choice selected: {choice}")
+        #fills form fields and downloads cover art when a dropdown choice is selected
+        if choice in ["Search a game to populate matches...", "No matches found", "Select a match..."]:
+            return
+
+        # determine which game index was clicked
+        try: 
+            values = self.matches_combo.cget("values") # get the current list of dropdown values
+            selected_idx = values.index(choice) # find the index of the selected choice in the dropdown values
+            self.selected_game = self.search_results[selected_idx] # get the corresponding game metadata from the search results
+        except (ValueError, IndexError):
+            return
+
+        # fill text inputs with said game metadata
+        self.title_entry.delete(0, "end")
+        self.title_entry.insert(0, self.selected_game["title"])
+
+        self.release_entry.delete(0, "end")
+        self.release_entry.insert(0, self.selected_game["release_date"])
+
+        self.dev_entry.delete(0, "end")
+        self.dev_entry.insert(0, self.selected_game["developer"])
+
+        self.genre_entry.delete(0, "end")
+        self.genre_entry.insert(0, self.selected_game["genre"])
+
+        self.desc_textbox.delete("1.0", "end")
+        self.desc_textbox.insert("1.0", self.selected_game["description"])
+
+        # fetch and load the cover art preview asynchronously
+        if self.selected_game["cover_url"]:
+            self.cover_lbl.configure(text="Loading cover...")
+            thread = threading.Thread(
+                target=self._download_cover_thread_target, 
+                args=(self.selected_game["cover_url"],), 
+                daemon=True
+            )
+            thread.start()
+        else:
+            self.cover_lbl.configure(text="No Cover Art Available", image=None)
+            self.temp_image_data = None
+
+    def _download_cover_thread_target(self, url):
+        # worker thread to download image binary bytes into memory
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            image_bytes = response.content
+            # safely schedule the image renderer on the main thread
+            self.after(0, self._on_cover_download_complete, image_bytes)
+        except Exception as e:
+            print(f"Failed to download cover art preview: {e}")
+            self.after(0, lambda: self.cover_lbl.configure(text="Failed to load cover", image=None))
+
+    def _on_cover_download_complete(self, image_bytes):
+        # callback to convert binary bytes into a Pillow image and display it
+        try:
+            self.temp_image_data = image_bytes  # cache bytes in memory to save later
+            
+            # load from in memory stream using BytesIO
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(200, 280))
+            
+            self.cover_lbl.configure(image=ctk_img, text="")
+            self.cover_lbl.image = ctk_img
+        except Exception as e:
+            print(f"Error rendering cover preview: {e}")
+            self.cover_lbl.configure(text="Error loading cover", image=None)
 
     def _on_save(self):
-        # placeholder for whatever
-        print("Save button clicked!")
+        #saves a new game or updates an existing game in the database
+        title = self.title_entry.get().strip()
+        release_date = self.release_entry.get().strip()
+        developer = self.dev_entry.get().strip()
+        genre = self.genre_entry.get().strip()
+        description = self.desc_textbox.get("1.0", "end-1c").strip()
+        status = self.status_combo.get()
+
+        if not title:
+            from tkinter import messagebox
+            messagebox.showerror("Error", "Game Title is required!")
+            return
+
+        # handle saving the cover art file locally
+        local_cover_path = None
+        if self.temp_image_data:
+            # get covers directory absolute path
+            covers_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "covers"))
+            os.makedirs(covers_dir, exist_ok=True)
+            
+            # create a clean file name based on title
+            safe_title = "".join([c if c.isalnum() else "_" for c in title]).lower()  # isalnum ensures only letters and numbers are kept, others replaced with underscore
+            local_cover_path_abs = os.path.join(covers_dir, f"{safe_title}.jpg") # absolute path to save the cover art
+            
+            try:
+                with open(local_cover_path_abs, "wb") as f:
+                    f.write(self.temp_image_data)
+                #store relative path so database is portable, that way if the user moves the app folder, the relative path will still work
+                local_cover_path = os.path.join("data", "covers", f"{safe_title}.jpg")
+            except Exception as e:
+                print(f"Failed to save cover art locally: {e}")
+                local_cover_path = None
+        elif self.is_edit_mode:
+            # retain original cover path if we didnt fetch a new one
+            local_cover_path = self.game_data.get("local_cover_path")
+
+        from tkinter import messagebox
+        if self.is_edit_mode:
+            game_id = self.game_data["id"]
+            success = update_game(game_id, title, release_date, developer, genre, description, status)
+            if success:
+                messagebox.showinfo("Success", f"'{title}' updated successfully!")
+                self._on_back()
+            else:
+                messagebox.showerror("Error", f"Could not update game. A game with the title '{title}' might already exist.")
+        else:
+            cover_url = self.selected_game["cover_url"] if self.selected_game else None
+            success = add_game(
+                title=title,
+                release_date=release_date,
+                cover_url=cover_url,
+                local_cover_path=local_cover_path,
+                developer=developer,
+                genre=genre,
+                description=description,
+                status=status
+            )
+            if success:
+                messagebox.showinfo("Success", f"'{title}' saved successfully to your library!")
+                self._on_back()
+            else:
+                messagebox.showerror("Error", f"A game named '{title}' is already in your library!")
 
     def _on_delete(self):
-        # aoi koi daidaiiroooo no hi itai kimi nooo yokooo
-        print("Delete button clicked!")
+        # prompts confirmation and removes the game from library and deletes local cover file
+        from tkinter import messagebox
+        if not self.is_edit_mode:
+            return
+            
+        title = self.game_data["title"]
+        confirm = messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete '{title}' from your library?")
+        if not confirm:
+            return
+            
+        # delete local cover file if it exists
+        local_path = self.game_data.get("local_cover_path")
+        if local_path:
+            # resolve relative path to abslute
+            abs_local_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", local_path))
+            if os.path.exists(abs_local_path):
+                try:
+                    os.remove(abs_local_path) 
+                except Exception as e: # if the file is missing or locked, we still want to delete the database record[]
+                    print(f"Failed to delete local cover file: {e}")
+
+        # delete database record 
+        delete_game(self.game_data["id"])
+        messagebox.showinfo("Deleted", f"'{title}' has been removed from your library.")
+        self._on_back()
