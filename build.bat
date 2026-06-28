@@ -1,0 +1,1 @@
+python -m PyInstaller --onefile --windowed --collect-all customtkinter src/main.py
