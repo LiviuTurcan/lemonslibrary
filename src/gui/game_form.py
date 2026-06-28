@@ -33,13 +33,13 @@ class GameForm(ctk.CTkFrame):
 
         self.setup_ui(game_data, on_back_callback)
     
-    def setup_ui(game_data, on_back_callback):
+    def setup_ui(self, game_data, on_back_callback):
         self.on_back_callback = on_back_callback
         self.game_data = game_data
         self.is_edit_mode = game_data is not None
 
         self._create_top_navigation()
-        self.create_content_containers()
+        self._create_content_containers()
         self._create_left_form_fields()
         self._create_right_sidebar()
     def _create_top_navigation(self):
@@ -48,7 +48,7 @@ class GameForm(ctk.CTkFrame):
 
         # back button
         self.back_btn = ctk.CTkButton(self.top_frame, text="Back", command=self._on_back)
-        self.back_btn.grid(side ="left")
+        self.back_btn.pack(side ="left")
 
         #header
         header_text = "Edit Game Details" if self.is_edit_mode else "Add New Game"
